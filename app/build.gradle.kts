@@ -49,6 +49,11 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.2.0-rc01")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    implementation("com.google.accompanist:accompanist-permissions:0.37.3")
+
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
+    implementation("androidx.compose.ui:ui-viewbinding:1.9.0")
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
