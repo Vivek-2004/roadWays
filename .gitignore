@@ -17,3 +17,5 @@ local.properties
 # Gradle build files
 .gradle/
 build/
+
+/.kotlin
