@@ -1,0 +1,519 @@
+package com.drive.road
+
+import android.Manifest
+import android.content.Context
+import android.graphics.Paint
+import android.location.Location
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+
+@OptIn(ExperimentalPermissionsApi::class)
+@Composable
+fun RoadMonitoringScreen(
+    viewModel: RoadMonitoringViewModel = viewModel()
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    val currentLocation by viewModel.currentLocation.collectAsState()
+    val isTracking by viewModel.isTracking.collectAsState()
+    val sensorData by viewModel.sensorData.collectAsState()
+    val accelerometerHistory by viewModel.accelerometerHistory.collectAsState()
+    val detectedEvents by viewModel.detectedEvents.collectAsState()
+    val showEventDialog by viewModel.showEventDialog.collectAsState()
+    val pendingEvent by viewModel.pendingEvent.collectAsState()
+
+    // Request permissions
+    val locationPermissions = rememberMultiplePermissionsState(
+        permissions = listOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+    )
+
+    LaunchedEffect(locationPermissions.allPermissionsGranted) {
+        if (locationPermissions.allPermissionsGranted) {
+            viewModel.initialize(context)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        if (!locationPermissions.allPermissionsGranted) {
+            PermissionRequestContent(
+                onRequestPermissions = { locationPermissions.launchMultiplePermissionRequest() }
+            )
+        } else {
+            // Top Bar with Status
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 4.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Road Monitor",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+
+                    Button(
+                        onClick = {
+                            if (isTracking) {
+                                viewModel.stopTracking()
+                            } else {
+                                viewModel.startTracking(context)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isTracking) Color.Red else Color.Green
+                        )
+                    ) {
+                        Text(if (isTracking) "STOP" else "START")
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Sensor Data Graphs
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    elevation = CardDefaults.cardElevation(4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            text = "Accelerometer Data (60Hz)",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Z-Axis Graph (Reoriented)
+                        Text("Z-Axis (Reoriented)", fontSize = 14.sp)
+                        AccelerometerGraph(
+                            data = accelerometerHistory.map { it.reorientedZ },
+                            color = Color.Blue,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(150.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Current Values
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Speed", fontSize = 12.sp, color = Color.Gray)
+                                Text(
+                                    "%.1f km/h".format(sensorData.speed),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Z-Axis", fontSize = 12.sp, color = Color.Gray)
+                                Text(
+                                    "%.3f g".format(sensorData.reorientedZ),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Detected Events List
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    elevation = CardDefaults.cardElevation(4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Detected Events",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+
+                            if (detectedEvents.isNotEmpty()) {
+                                TextButton(
+                                    onClick = { viewModel.clearEvents() }
+                                ) {
+                                    Text("Clear", color = Color.Red)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (detectedEvents.isEmpty()) {
+                            Text(
+                                "No events detected yet",
+                                color = Color.Gray,
+                                fontSize = 14.sp
+                            )
+                        } else {
+                            detectedEvents.takeLast(5).reversed().forEach { event ->
+                                EventCard(event = event)
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Map View
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                        .padding(8.dp),
+                    elevation = CardDefaults.cardElevation(4.dp)
+                ) {
+                    MapView(
+                        currentLocation = currentLocation,
+                        detectedEvents = detectedEvents
+                    )
+                }
+            }
+        }
+    }
+
+    // Event Confirmation Dialog
+    if (showEventDialog && pendingEvent != null) {
+        EventConfirmationDialog(
+            event = pendingEvent!!,
+            onConfirm = { viewModel.confirmEvent(true) },
+            onDeny = { viewModel.confirmEvent(false) }
+        )
+    }
+}
+
+@Composable
+fun AccelerometerGraph(
+    data: List<Float>,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        if (data.isEmpty()) return@Canvas
+
+        val width = size.width
+        val height = size.height
+        val maxPoints = 120 // Show last 2 seconds at 60Hz
+        val displayData = data.takeLast(maxPoints)
+
+        if (displayData.isEmpty()) return@Canvas
+
+        val maxValue = displayData.maxOfOrNull { abs(it) } ?: 1f
+        val minValue = -maxValue
+        val range = maxValue - minValue
+
+        // Draw grid
+        val gridColor = Color.Gray.copy(alpha = 0.2f)
+        for (i in 0..4) {
+            val y = height * i / 4
+            drawLine(
+                color = gridColor,
+                start = Offset(0f, y),
+                end = Offset(width, y),
+                strokeWidth = 1f
+            )
+        }
+
+        // Draw zero line
+        val zeroY = height / 2
+        drawLine(
+            color = Color.Gray.copy(alpha = 0.5f),
+            start = Offset(0f, zeroY),
+            end = Offset(width, zeroY),
+            strokeWidth = 2f
+        )
+
+        // Draw data
+        val path = Path()
+        displayData.forEachIndexed { index, value ->
+            val x = width * index / (maxPoints - 1)
+            val normalizedValue = (value - minValue) / range
+            val y = height * (1 - normalizedValue)
+
+            if (index == 0) {
+                path.moveTo(x, y)
+            } else {
+                path.lineTo(x, y)
+            }
+        }
+
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(width = 2f)
+        )
+
+        // Draw axis labels
+        drawContext.canvas.nativeCanvas.apply {
+            val paint = Paint().apply {
+                textSize = 24f
+                this.color = Color.Gray.toArgb()
+            }
+            drawText("%.2fg".format(maxValue), 10f, 30f, paint)
+            drawText("%.2fg".format(minValue), 10f, height - 10f, paint)
+        }
+    }
+}
+
+@Composable
+fun EventCard(event: RoadEvent) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = when (event.type) {
+            EventType.SPEED_BREAKER -> Color(0xFFFFF3E0)
+            EventType.POTHOLE -> Color(0xFFFFEBEE)
+            EventType.BROKEN_PATCH -> Color(0xFFFCE4EC)
+            else -> Color.LightGray
+        },
+        shape = MaterialTheme.shapes.small
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text(
+                    text = when (event.type) {
+                        EventType.SPEED_BREAKER -> "🚧 Speed Breaker"
+                        EventType.POTHOLE -> "🕳️ Pothole"
+                        EventType.BROKEN_PATCH -> "⚠️ Broken Patch"
+                        else -> "Road Event"
+                    },
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = "Conf: ${(event.confidence * 100).toInt()}% | Speed: %.1f km/h".format(event.speed),
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+            }
+
+            Text(
+                text = "%.4f, %.4f".format(event.latitude, event.longitude),
+                fontSize = 10.sp,
+                color = Color.Gray
+            )
+        }
+    }
+}
+
+@Composable
+fun EventConfirmationDialog(
+    event: RoadEvent,
+    onConfirm: () -> Unit,
+    onDeny: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDeny,
+        icon = {
+            Text(
+                text = when (event.type) {
+                    EventType.SPEED_BREAKER -> "🚧"
+                    EventType.POTHOLE -> "🕳️"
+                    EventType.BROKEN_PATCH -> "⚠️"
+                    else -> "❓"
+                },
+                fontSize = 48.sp
+            )
+        },
+        title = {
+            Text(
+                text = "Road Event Detected!",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = when (event.type) {
+                        EventType.SPEED_BREAKER -> "Speed Breaker Detected"
+                        EventType.POTHOLE -> "Pothole Detected"
+                        EventType.BROKEN_PATCH -> "Broken Road Patch Detected"
+                        else -> "Unknown Event"
+                    },
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text("Location: %.6f, %.6f".format(event.latitude, event.longitude))
+                Text("Confidence: ${(event.confidence * 100).toInt()}%")
+                Text("Speed: %.1f km/h".format(event.speed))
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    "Is this detection correct?",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Green)
+            ) {
+                Text("YES")
+            }
+        },
+        dismissButton = {
+            Button(
+                onClick = onDeny,
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+            ) {
+                Text("NO")
+            }
+        }
+    )
+}
+
+@Composable
+fun MapView(
+    currentLocation: Location?,
+    detectedEvents: List<RoadEvent>
+) {
+    val context = LocalContext.current
+
+    AndroidView(
+        factory = { ctx ->
+            Configuration.getInstance()
+                .load(ctx, ctx.getSharedPreferences("osmdroid", Context.MODE_PRIVATE))
+
+            MapView(ctx).apply {
+                setTileSource(TileSourceFactory.MAPNIK)
+                setMultiTouchControls(true)
+                controller.setZoom(16.0)
+            }
+        },
+        update = { map ->
+            map.overlays.clear()
+
+            // Add current location marker
+            currentLocation?.let { location ->
+                val geoPoint = GeoPoint(location.latitude, location.longitude)
+                val marker = Marker(map).apply {
+                    position = geoPoint
+                    title = "Current Location"
+                    icon = ContextCompat.getDrawable(context, R.drawable.location)
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                }
+                map.overlays.add(marker)
+                map.controller.animateTo(geoPoint)
+            }
+
+            // Add event markers
+            detectedEvents.forEach { event ->
+                val geoPoint = GeoPoint(event.latitude, event.longitude)
+                val marker = Marker(map).apply {
+                    position = geoPoint
+                    title = when (event.type) {
+                        EventType.SPEED_BREAKER -> "Speed Breaker"
+                        EventType.POTHOLE -> "Pothole"
+                        EventType.BROKEN_PATCH -> "Broken Patch"
+                        else -> "Event"
+                    }
+                    icon = ContextCompat.getDrawable(context, R.drawable.target)
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                }
+                map.overlays.add(marker)
+            }
+
+            map.invalidate()
+        },
+        modifier = Modifier.fillMaxSize()
+    )
+}
+
+@Composable
+fun PermissionRequestContent(onRequestPermissions: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "Location Permission Required",
+            style = MaterialTheme.typography.headlineMedium
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "This app needs location permission to track road conditions and your position.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Button(onClick = onRequestPermissions) {
+            Text("Grant Permission")
+        }
+    }
+}
