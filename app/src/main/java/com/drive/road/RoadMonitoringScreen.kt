@@ -4,13 +4,34 @@ import android.Manifest
 import android.content.Context
 import android.graphics.Paint
 import android.location.Location
+import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -28,17 +49,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
+@RequiresApi(Build.VERSION_CODES.O)
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun RoadMonitoringScreen(
@@ -350,7 +368,9 @@ fun EventCard(event: RoadEvent) {
                     fontSize = 14.sp
                 )
                 Text(
-                    text = "Conf: ${(event.confidence * 100).toInt()}% | Speed: %.1f km/h".format(event.speed),
+                    text = "Conf: ${(event.confidence * 100).toInt()}% | Speed: %.1f km/h".format(
+                        event.speed
+                    ),
                     fontSize = 12.sp,
                     color = Color.Gray
                 )
