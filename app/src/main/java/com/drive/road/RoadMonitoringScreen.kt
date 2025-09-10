@@ -150,7 +150,7 @@ fun RoadMonitoringScreen(
                         modifier = Modifier.padding(16.dp)
                     ) {
                         Text(
-                            text = "Accelerometer Data (60Hz)",
+                            text = "Accelerometer Data (1500Hz)",
                             fontWeight = FontWeight.Bold,
                             fontSize = 16.sp
                         )
@@ -276,7 +276,7 @@ fun AccelerometerGraph(
 
         val width = size.width
         val height = size.height
-        val maxPoints = 120 // Show last 2 seconds at 60Hz
+        val maxPoints = 300 // Show last 2 seconds at 150Hz
         val displayData = data.takeLast(maxPoints)
 
         if (displayData.isEmpty()) return@Canvas

@@ -7,10 +7,17 @@ import android.os.Build
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.android.gms.location.*
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.Granularity
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,6 +60,8 @@ class RoadMonitoringViewModel : ViewModel() {
         viewModelScope.launch {
             sensorDataManager?.sensorData?.collect { reading ->
                 _sensorData.value = reading
+
+                Log.d("sensorData", reading.toString())
 
                 // Update history (keep last 120 readings for 2 seconds at 60Hz)
                 val history = _accelerometerHistory.value.toMutableList()
