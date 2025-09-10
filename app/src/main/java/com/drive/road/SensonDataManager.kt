@@ -13,8 +13,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -58,6 +56,20 @@ enum class EventType {
     NORMAL
 }
 
+enum class VehicleType {
+    TWO_WHEELER_SCOOTY,
+    TWO_WHEELER_BIKE,
+    THREE_WHEELER_AUTO,
+    FOUR_WHEELER_CAR
+}
+
+enum class PhonePlacement {
+    MOUNTER,
+    POCKET,
+    WINDSHIELD,
+    DASHBOARD
+}
+
 class SensorDataManager(private val context: Context) : SensorEventListener {
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -66,37 +78,56 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
 
     private val _sensorData = MutableStateFlow(SensorReading())
     val sensorData: StateFlow<SensorReading> = _sensorData.asStateFlow()
+
     private val _detectedEvents = MutableStateFlow<List<RoadEvent>>(emptyList())
     val detectedEvents: StateFlow<List<RoadEvent>> = _detectedEvents.asStateFlow()
 
-    // Auto-threshold parameters (from paper Section 5.1.2)
-    private var T0_speedBreaker = 1.8f  // Initial threshold for 2-wheeler speed breaker
-    private var T0_pothole = 0.714f     // Initial threshold for 2-wheeler pothole
-    private val B = 20f                 // Base point (km/h)
-    private val L = 20f                 // Lower limit (km/h)
-    private val S = 0.015f              // Scaling factor
+    // Phase 1 candidates before Phase 2 classification
+    private val _candidateEvents = MutableStateFlow<List<RoadEvent>>(emptyList())
 
-    // Moving average for speed
+    // Vehicle and placement configuration (should be configurable by user)
+    private var vehicleType = VehicleType.TWO_WHEELER_SCOOTY
+    private var phonePlacement = PhonePlacement.MOUNTER
+
+    // Initial thresholds based on Table 2 from paper
+    private val initialThresholds = mapOf(
+        Pair(VehicleType.TWO_WHEELER_SCOOTY, PhonePlacement.MOUNTER) to Pair(1.8f, 0.714f),
+        Pair(VehicleType.TWO_WHEELER_SCOOTY, PhonePlacement.POCKET) to Pair(1.57f, 0.612f),
+        Pair(VehicleType.TWO_WHEELER_BIKE, PhonePlacement.MOUNTER) to Pair(1.73f, 0.816f),
+        Pair(VehicleType.TWO_WHEELER_BIKE, PhonePlacement.POCKET) to Pair(1.53f, 0.714f),
+        Pair(VehicleType.THREE_WHEELER_AUTO, PhonePlacement.MOUNTER) to Pair(1.47f, 0.612f),
+        Pair(VehicleType.FOUR_WHEELER_CAR, PhonePlacement.MOUNTER) to Pair(1.08f, 0.41f)
+    )
+
+    // Auto-threshold parameters from Equation (1)
+    private val B = 20f  // Base point (km/h) - static threshold acts up to this speed
+    private val L = 20f  // Lower limit (km/h) - threshold starts adapting from this point
+    private val S = 0.05f // Scaling factor - rate of threshold increase per km/h above L
+
+    // Moving average for speed calculation (paper mentions using moving average)
     private val speedHistory = mutableListOf<Float>()
     private val maxSpeedHistorySize = 10
 
-    // Event detection history
+    // Event detection history for feature extraction
     private val zAxisHistory = mutableListOf<Pair<Long, Float>>()
-    private val maxZHistorySize = 450 // 3 seconds at 150Hz
+    private val maxZHistorySize = 900 // 6 seconds at 150Hz as mentioned in paper
     private var lastEventTime = 0L
-    private val minTimeBetweenEvents = 500L // milliseconds
-    private val deltaTimeWindow = 1000L // 1 second window for finding extrema
+    private val minTimeBetweenEvents = 200L // Minimum 200ms between events
+    private val deltaTimeWindow = 1000L // 1 second window for finding extrema (∆ in paper)
 
-    // Gravity filter
-    private val gravity = FloatArray(3)
+    // Gravity compensation using low-pass filter
+    private val gravity = FloatArray(3) { 0f }
     private val alpha = 0.8f
 
-    // Current location
+    // Current location and movement data
     private var currentLocation: Location? = null
+    private var previousLocation: Location? = null
 
     fun startSensorCollection() {
-        sensorManager.registerListener(this, accelerometer, 16666) // 60Hz
-        sensorManager.registerListener(this, gyroscope, 16666)
+        // Paper mentions 150Hz sampling rate
+        val samplingPeriod = 1000000 / 150 // microseconds for 150Hz
+        sensorManager.registerListener(this, accelerometer, samplingPeriod)
+        sensorManager.registerListener(this, gyroscope, samplingPeriod)
     }
 
     fun stopSensorCollection() {
@@ -104,9 +135,22 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
     }
 
     fun updateLocation(location: Location) {
+        previousLocation = currentLocation
         currentLocation = location
-        val speedKmh = location.speed * 3.6f
-        updateSpeedHistory(speedKmh)
+
+        // Calculate speed more accurately using GPS
+        val speed = if (location.hasSpeed()) {
+            location.speed * 3.6f // Convert m/s to km/h
+        } else if (previousLocation != null) {
+            // Calculate speed from location change
+            val distance = location.distanceTo(previousLocation!!)
+            val timeDiff = (location.time - previousLocation!!.time) / 1000f
+            if (timeDiff > 0) (distance / timeDiff) * 3.6f else 0f
+        } else {
+            0f
+        }
+
+        updateSpeedHistory(speed)
     }
 
     private fun updateSpeedHistory(speed: Float) {
@@ -119,24 +163,25 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
     override fun onSensorChanged(event: SensorEvent) {
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
-                // Apply gravity filter
+                // Apply low-pass filter for gravity compensation
                 gravity[0] = alpha * gravity[0] + (1 - alpha) * event.values[0]
                 gravity[1] = alpha * gravity[1] + (1 - alpha) * event.values[1]
                 gravity[2] = alpha * gravity[2] + (1 - alpha) * event.values[2]
 
+                // Remove gravity to get linear acceleration
                 val linearAccelX = event.values[0] - gravity[0]
                 val linearAccelY = event.values[1] - gravity[1]
                 val linearAccelZ = event.values[2] - gravity[2]
 
-                // Auto-reorientation (Paper Section 5.1.1)
-                val reorientedZ = autoReorient(linearAccelX, linearAccelY, linearAccelZ)
+                // Auto-reorientation using Euler angles (Section 5.1.1)
+                val reorientedComponents = autoReorient(linearAccelX, linearAccelY, linearAccelZ)
 
                 val reading = _sensorData.value.copy(
                     timestamp = System.currentTimeMillis(),
                     accelerometerX = linearAccelX,
                     accelerometerY = linearAccelY,
                     accelerometerZ = linearAccelZ,
-                    reorientedZ = reorientedZ,
+                    reorientedZ = reorientedComponents.third, // Use reoriented Z-axis
                     speed = speedHistory.lastOrNull() ?: 0f,
                     latitude = currentLocation?.latitude ?: 0.0,
                     longitude = currentLocation?.longitude ?: 0.0
@@ -144,11 +189,11 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
 
                 _sensorData.value = reading
 
-                // Update Z-axis history
-                updateZAxisHistory(reading.timestamp, reorientedZ)
+                // Update Z-axis history for feature extraction
+                updateZAxisHistory(reading.timestamp, reading.reorientedZ)
 
-                // Phase 1: Threshold-based candidate detection
-                detectEventCandidates(reading)
+                // Phase 1: Auto-threshold based candidate detection
+                detectPhase1Candidates(reading)
             }
 
             Sensor.TYPE_GYROSCOPE -> {
@@ -163,31 +208,53 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun autoReorient(ax: Float, ay: Float, az: Float): Float {
-        // Euler angle-based reorientation (Paper Section 5.1.1)
-        val theta = atan2(ay.toDouble(), az.toDouble())
-        val beta = atan2(-ax.toDouble(), sqrt((ay * ay + az * az).toDouble()))
+    /**
+     * Auto-reorientation using Euler angles as described in Section 5.1.1
+     * Returns (a'x, a'y, a'z) in vehicle reference frame
+     */
+    private fun autoReorient(ax: Float, ay: Float, az: Float): Triple<Float, Float, Float> {
+        // Calculate Euler angles
+        val theta = atan2(ay.toDouble(), az.toDouble()) // Pitch angle (Y-axis rotation)
+        val beta = atan2(
+            -ax.toDouble(),
+            sqrt((ay * ay + az * az).toDouble())
+        ) // Roll angle (X-axis rotation)
 
-        // Calculate reoriented Z-axis: a'z = -ax*sin(β) + ay*cos(β)*sin(θ) + az*cos(β)*cos(θ)
-        val reorientedZ =
+        // Apply rotation matrix transformations
+        val aPrimeX =
+            (ax * cos(beta) + ay * sin(beta) * sin(theta) + az * cos(theta) * sin(beta)).toFloat()
+        val aPrimeY = (ay * cos(theta) - az * sin(theta)).toFloat()
+        val aPrimeZ =
             (-ax * sin(beta) + ay * cos(beta) * sin(theta) + az * cos(beta) * cos(theta)).toFloat()
 
-        return reorientedZ
+        return Triple(aPrimeX, aPrimeY, aPrimeZ)
     }
 
     private fun updateZAxisHistory(timestamp: Long, zValue: Float) {
         zAxisHistory.add(Pair(timestamp, zValue))
-        Log.d("zAxis", Pair(timestamp, zValue).toString())
 
-        // Keep only recent history
-        val cutoffTime = timestamp - (maxZHistorySize * 16) // ~3 seconds
+        // Keep only recent history (6 seconds as mentioned in paper)
+        val cutoffTime = timestamp - (6000) // 6 seconds
         zAxisHistory.removeAll { it.first < cutoffTime }
     }
 
-    private fun calculateDynamicThreshold(avgSpeed: Float, isSpeedBreaker: Boolean): Float {
-        // Paper Equation (1): Tt = T0 + ((1/t * Σ Vi - L) × S) if Σ Vi > B, else T0
+    /**
+     * Calculate dynamic threshold using Equation (1) from the paper
+     */
+    private fun calculateDynamicThreshold(isSpeedBreaker: Boolean): Float {
+        val (T0_speedBreaker, T0_pothole) = initialThresholds[Pair(vehicleType, phonePlacement)]
+            ?: Pair(1.8f, 0.714f)
+
         val T0 = if (isSpeedBreaker) T0_speedBreaker else T0_pothole
 
+        // Calculate moving average of speed
+        val avgSpeed = if (speedHistory.isNotEmpty()) {
+            speedHistory.sum() / speedHistory.size
+        } else {
+            0f
+        }
+
+        // Apply Equation (1): Tt = T0 + ((1/t * Σ Vi - L) × S) if Σ Vi > B, else T0
         return if (avgSpeed > B) {
             T0 + ((avgSpeed - L) * S)
         } else {
@@ -195,7 +262,10 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
         }
     }
 
-    private fun detectEventCandidates(reading: SensorReading) {
+    /**
+     * Phase 1: Auto-threshold based candidate detection (Section 5.1)
+     */
+    private fun detectPhase1Candidates(reading: SensorReading) {
         val currentTime = System.currentTimeMillis()
 
         // Avoid detecting events too frequently
@@ -203,54 +273,57 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
             return
         }
 
-        val avgSpeed = if (speedHistory.isNotEmpty()) {
-            speedHistory.average().toFloat()
-        } else {
-            reading.speed
-        }
-
-        val speedBreakerThreshold = calculateDynamicThreshold(avgSpeed, true)
-        val potholeThreshold = calculateDynamicThreshold(avgSpeed, false)
+        val speedBreakerThreshold = calculateDynamicThreshold(true)
+        val potholeThreshold = calculateDynamicThreshold(false)
 
         val zValue = reading.reorientedZ
 
-        // Phase 1: Threshold crossing detection (candidate identification)
+        // Detect candidates based on threshold crossing
         val isSpeedBreakerCandidate = zValue > speedBreakerThreshold
         val isPotholeCandidate = zValue < -potholeThreshold
 
         if (isSpeedBreakerCandidate || isPotholeCandidate) {
-            // Extract features for Phase 2 classification
+            val candidateType =
+                if (isSpeedBreakerCandidate) EventType.SPEED_BREAKER else EventType.POTHOLE
+
+            val candidate = RoadEvent(
+                type = candidateType,
+                latitude = reading.latitude,
+                longitude = reading.longitude,
+                timestamp = currentTime,
+                confidence = 0.5f, // Phase 1 confidence
+                zAxisValue = zValue,
+                speed = reading.speed
+            )
+
+            // Add to candidates for Phase 2 processing
+            _candidateEvents.value = _candidateEvents.value + candidate
+
+            // Immediately process through Phase 2
             val features = extractEventFeatures(reading, currentTime)
+            val classifiedEvent = classifyUsingDecisionTree(candidate, features)
 
-            // Phase 2: Feature-based classification using decision tree logic
-            val eventType = classifyEventUsingFeatures(zValue, features, isSpeedBreakerCandidate)
-
-            if (eventType != EventType.NORMAL) {
-                val event = RoadEvent(
-                    type = eventType,
-                    latitude = reading.latitude,
-                    longitude = reading.longitude,
-                    timestamp = currentTime,
-                    confidence = calculateConfidence(eventType, zValue, features),
-                    zAxisValue = zValue,
-                    speed = reading.speed,
-                    features = features
-                )
-
-                _detectedEvents.value = _detectedEvents.value + event
+            if (classifiedEvent.type != EventType.NORMAL) {
+                _detectedEvents.value = _detectedEvents.value + classifiedEvent
                 lastEventTime = currentTime
+
+                Log.d(
+                    "RoadEvent",
+                    "Detected ${classifiedEvent.type} with confidence ${classifiedEvent.confidence}"
+                )
             }
         }
     }
 
+    /**
+     * Extract features for Phase 2 classification as described in Table 3
+     */
     private fun extractEventFeatures(reading: SensorReading, currentTime: Long): EventFeatures {
-        // Extract features as described in Paper Table 3
+        // Find Z_Next_t: next local extrema within time window ∆
+        val zNext = findLocalExtrema(currentTime, true)
 
-        // Find ZNext_t: next local extrema within time window Δ
-        val zNext = findNextLocalExtrema(currentTime)
-
-        // Find ZPrev_t: previous local extrema within time window Δ
-        val zPrev = findPreviousLocalExtrema(currentTime)
+        // Find Z_Prev_t: previous local extrema within time window ∆
+        val zPrev = findLocalExtrema(currentTime, false)
 
         // Calculate Tp: time since last event
         val timeSinceLastEvent = currentTime - lastEventTime
@@ -264,43 +337,38 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
         )
     }
 
-    private fun findNextLocalExtrema(currentTime: Long): Float? {
-        // Look for local extrema in the next deltaTimeWindow
-        val futureData = zAxisHistory.filter {
-            it.first > currentTime && it.first <= currentTime + deltaTimeWindow
+    /**
+     * Find local extrema (maxima or minima) within the time window ∆
+     */
+    private fun findLocalExtrema(currentTime: Long, searchForward: Boolean): Float? {
+        val windowData = if (searchForward) {
+            // Search forward in time
+            zAxisHistory.filter {
+                it.first > currentTime && it.first <= currentTime + deltaTimeWindow
+            }
+        } else {
+            // Search backward in time
+            zAxisHistory.filter {
+                it.first >= currentTime - deltaTimeWindow && it.first < currentTime
+            }
         }.map { it.second }
 
-        if (futureData.size < 3) return null
+        if (windowData.size < 3) return null
 
-        // Find local maxima or minima
-        return findLocalExtrema(futureData)
-    }
-
-    private fun findPreviousLocalExtrema(currentTime: Long): Float? {
-        // Look for local extrema in the previous deltaTimeWindow
-        val pastData = zAxisHistory.filter {
-            it.first >= currentTime - deltaTimeWindow && it.first < currentTime
-        }.map { it.second }
-
-        if (pastData.size < 3) return null
-
-        return findLocalExtrema(pastData)
-    }
-
-    private fun findLocalExtrema(data: List<Float>): Float? {
-        if (data.size < 3) return null
-
-        // Find the most significant local extremum (largest absolute value)
+        // Find most significant local extrema
         var maxExtrema: Float? = null
         var maxAbsValue = 0f
 
-        for (i in 1 until data.size - 1) {
-            val current = data[i]
-            val prev = data[i - 1]
-            val next = data[i + 1]
+        for (i in 1 until windowData.size - 1) {
+            val current = windowData[i]
+            val prev = windowData[i - 1]
+            val next = windowData[i + 1]
 
             // Check if it's a local maximum or minimum
-            if ((current > prev && current > next) || (current < prev && current < next)) {
+            val isLocalMax = current > prev && current > next
+            val isLocalMin = current < prev && current < next
+
+            if (isLocalMax || isLocalMin) {
                 if (abs(current) > maxAbsValue) {
                     maxExtrema = current
                     maxAbsValue = abs(current)
@@ -311,92 +379,116 @@ class SensorDataManager(private val context: Context) : SensorEventListener {
         return maxExtrema
     }
 
-    private fun classifyEventUsingFeatures(
-        zt: Float,
-        features: EventFeatures,
-        isSpeedBreakerCandidate: Boolean
-    ): EventType {
-        // Implement decision tree logic from Paper Figure 10
-
-        // Root node: Check if it's a real event or noise
+    /**
+     * Phase 2: Decision tree classifier as described in Figure 10
+     */
+    private fun classifyUsingDecisionTree(
+        candidate: RoadEvent,
+        features: EventFeatures
+    ): RoadEvent {
+        // Root node: Check if it's a real event or false positive
         if (!isRealEvent(features)) {
-            return EventType.NORMAL
+            return candidate.copy(type = EventType.NORMAL, confidence = 0.1f)
         }
 
-        // Speed breaker vs pothole classification
-        if (isSpeedBreakerCandidate) {
-            // Check for speed breaker signature: positive peak followed by negative
-            if (features.zNext != null && features.zNext < 0 && zt > 0) {
-                return EventType.SPEED_BREAKER
+        var finalType = candidate.type
+        var confidence = 0.6f
+
+        when (candidate.type) {
+            EventType.SPEED_BREAKER -> {
+                // Check speed breaker signature: positive peak followed by negative
+                if (features.zNext != null && features.zNext < 0 && features.zt > 0) {
+                    finalType = EventType.SPEED_BREAKER
+                    confidence = 0.9f
+                } else if (features.zPrev != null && features.zPrev < 0 &&
+                    features.timeSinceLastEvent < 3000
+                ) {
+                    // Ambiguous case: might be pothole detected as speed breaker
+                    finalType = EventType.POTHOLE
+                    confidence = 0.7f
+                } else {
+                    confidence = 0.6f
+                }
             }
 
-            // Check if it's actually an ambiguous pothole detected as speed breaker
-            if (features.zPrev != null && features.zPrev < 0 && features.timeSinceLastEvent < 3000) {
-                return EventType.POTHOLE
+            EventType.POTHOLE -> {
+                // Check pothole signature: negative peak followed by positive
+                if (features.zNext != null && features.zNext > 0 && features.zt < 0) {
+                    finalType = EventType.POTHOLE
+                    confidence = 0.9f
+                } else {
+                    confidence = 0.6f
+                }
             }
 
-            return EventType.SPEED_BREAKER
-        } else {
-            // Pothole candidate: negative peak followed by positive
-            if (features.zNext != null && features.zNext > 0 && zt < 0) {
-                return EventType.POTHOLE
+            else -> {
+                // Keep original classification
             }
-
-            return EventType.POTHOLE
         }
+
+        // Check for broken patch: multiple consecutive events
+        finalType = checkForBrokenPatch(finalType, features)
+
+        return candidate.copy(
+            type = finalType,
+            confidence = confidence,
+            features = features
+        )
     }
 
+    /**
+     * Check if event is real or caused by noise/interference
+     */
     private fun isRealEvent(features: EventFeatures): Boolean {
-        // Check if the detected event is real or just noise
-        // Real events should have significant amplitude and proper timing
+        // Event should have significant amplitude
+        val hasSignificantAmplitude = abs(features.zt) > 0.2f
 
-        val hasSignificantAmplitude = abs(features.zt) > 0.3f
-        val hasProperTiming = features.timeSinceLastEvent > 200L // At least 200ms apart
+        // Should not be too frequent (avoid noise)
+        val hasProperTiming = features.timeSinceLastEvent > minTimeBetweenEvents
+
+        // Speed should be reasonable for vehicle movement
         val hasReasonableSpeed =
-            features.instantaneousSpeed > 3f && features.instantaneousSpeed < 120f
+            features.instantaneousSpeed > 1f && features.instantaneousSpeed < 150f
 
         return hasSignificantAmplitude && hasProperTiming && hasReasonableSpeed
     }
 
-    private fun calculateConfidence(
-        type: EventType,
-        zAxisValue: Float,
-        features: EventFeatures
-    ): Float {
-        // Calculate confidence based on feature quality and thresholds
-        val baseConfidence = when (type) {
-            EventType.SPEED_BREAKER -> {
-                val threshold = calculateDynamicThreshold(features.instantaneousSpeed, true)
-                min(1f, abs(zAxisValue) / threshold)
+    /**
+     * Secondary PoC detection: Identify broken patches from consecutive events
+     */
+    private fun checkForBrokenPatch(currentType: EventType, features: EventFeatures): EventType {
+        // Paper mentions Tp (time between events) and Sp (speed) features
+        // If events are very close in time and speed is consistently low, it might be a broken patch
+
+        if (features.timeSinceLastEvent < 3000 && // Events within 3 seconds
+            features.instantaneousSpeed < 15f
+        ) {  // Low speed indicating careful driving
+
+            // Check if we have multiple recent events (indicating broken patch)
+            val recentEvents = _detectedEvents.value.filter {
+                System.currentTimeMillis() - it.timestamp < 10000 // Last 10 seconds
             }
 
-            EventType.POTHOLE -> {
-                val threshold = calculateDynamicThreshold(features.instantaneousSpeed, false)
-                min(1f, abs(zAxisValue) / threshold)
+            if (recentEvents.size >= 3) {
+                return EventType.BROKEN_PATCH
             }
-
-            EventType.BROKEN_PATCH -> 0.7f
-            EventType.NORMAL -> 0f
         }
 
-        // Adjust confidence based on feature quality
-        var confidence = baseConfidence
-
-        // Boost confidence if we have clear next/prev extrema
-        if (features.zNext != null || features.zPrev != null) {
-            confidence = min(1f, confidence * 1.2f)
-        }
-
-        // Reduce confidence for very low speeds (unreliable)
-        if (features.instantaneousSpeed < 10f) {
-            confidence *= 0.8f
-        }
-
-        return max(0.1f, min(1f, confidence))
+        return currentType
     }
 
     fun clearDetectedEvents() {
         _detectedEvents.value = emptyList()
+        _candidateEvents.value = emptyList()
         lastEventTime = 0L
+    }
+
+    // Configuration methods for vehicle and placement
+    fun setVehicleType(type: VehicleType) {
+        vehicleType = type
+    }
+
+    fun setPhonePlacement(placement: PhonePlacement) {
+        phonePlacement = placement
     }
 }

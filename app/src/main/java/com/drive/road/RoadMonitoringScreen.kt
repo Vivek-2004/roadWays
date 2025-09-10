@@ -368,9 +368,11 @@ fun EventCard(event: RoadEvent) {
                     fontSize = 14.sp
                 )
                 Text(
-                    text = "Conf: ${(event.confidence * 100).toInt()}% | Speed: %.1f km/h".format(
-                        event.speed
-                    ),
+                    text = "Conf: ${(event.confidence * 100).toInt()}% --- Speed: ${
+                        "%.1f".format(
+                            event.speed
+                        )
+                    } km/h",
                     fontSize = 12.sp,
                     color = Color.Gray
                 )
