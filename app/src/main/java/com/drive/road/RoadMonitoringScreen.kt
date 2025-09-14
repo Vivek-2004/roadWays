@@ -46,9 +46,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
@@ -60,7 +61,7 @@ import kotlin.math.abs
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun RoadMonitoringScreen(
-    viewModel: RoadMonitoringViewModel = viewModel()
+    viewModel: RoadMonitoringViewModel
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -87,6 +88,16 @@ fun RoadMonitoringScreen(
         }
     }
 
+    // FIXED: Add periodic location refresh when tracking
+    LaunchedEffect(isTracking) {
+        if (isTracking) {
+            while (isTracking) {
+                delay(2000) // Request location update every 2 seconds
+                viewModel.requestLocationUpdate()
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -103,33 +114,64 @@ fun RoadMonitoringScreen(
                 color = MaterialTheme.colorScheme.primary,
                 shadowElevation = 4.dp
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier.padding(16.dp)
                 ) {
-                    Text(
-                        text = "Road Monitor",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-
-                    Button(
-                        onClick = {
-                            if (isTracking) {
-                                viewModel.stopTracking()
-                            } else {
-                                viewModel.startTracking(context)
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isTracking) Color.Red else Color.Green
-                        )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(if (isTracking) "STOP" else "START")
+                        Text(
+                            text = "Road Monitor",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+
+                        Button(
+                            onClick = {
+                                if (isTracking) {
+                                    viewModel.stopTracking()
+                                } else {
+                                    viewModel.startTracking(context)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isTracking) Color.Red else Color.Green
+                            )
+                        ) {
+                            Text(if (isTracking) "STOP" else "START")
+                        }
+                    }
+
+                    // FIXED: Add location status indicator
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = if (currentLocation != null) {
+                                "📍 GPS: %.6f, %.6f".format(
+                                    currentLocation!!.latitude,
+                                    currentLocation!!.longitude
+                                )
+                            } else {
+                                "📍 GPS: Searching..."
+                            },
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+
+                        Text(
+                            text = if (currentLocation?.hasAccuracy() == true) {
+                                "±${currentLocation!!.accuracy.toInt()}m"
+                            } else {
+                                "No Accuracy"
+                            },
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     }
                 }
             }
@@ -139,6 +181,53 @@ fun RoadMonitoringScreen(
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
             ) {
+                // Location Status Card - FIXED: Add detailed location info
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    elevation = CardDefaults.cardElevation(4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            text = "Location Status",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (currentLocation != null) {
+                            val loc = currentLocation!!
+                            Text("📍 Latitude: ${loc.latitude}")
+                            Text("📍 Longitude: ${loc.longitude}")
+                            if (loc.hasAccuracy()) {
+                                Text("🎯 Accuracy: ±${loc.accuracy.toInt()}m")
+                            }
+                            if (loc.hasSpeed()) {
+                                Text("🚗 GPS Speed: %.1f km/h".format(loc.speed * 3.6f))
+                            }
+                            Text("📊 Sensor Speed: %.1f km/h".format(sensorData.speed))
+                            Text("⏰ Last Update: ${System.currentTimeMillis() - loc.time}ms ago")
+                        } else {
+                            Text(
+                                "🔍 Searching for GPS signal...",
+                                color = Color.Red
+                            )
+                        }
+
+                        // Manual location request button
+                        Button(
+                            onClick = { viewModel.requestLocationUpdate() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("🔄 Refresh Location")
+                        }
+                    }
+                }
+
                 // Sensor Data Graphs
                 Card(
                     modifier = Modifier
@@ -150,7 +239,7 @@ fun RoadMonitoringScreen(
                         modifier = Modifier.padding(16.dp)
                     ) {
                         Text(
-                            text = "Accelerometer Data (1500Hz)",
+                            text = "Accelerometer Data",
                             fontWeight = FontWeight.Bold,
                             fontSize = 16.sp
                         )
@@ -185,6 +274,13 @@ fun RoadMonitoringScreen(
                                 Text("Z-Axis", fontSize = 12.sp, color = Color.Gray)
                                 Text(
                                     "%.3f g".format(sensorData.reorientedZ),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Events", fontSize = 12.sp, color = Color.Gray)
+                                Text(
+                                    "${detectedEvents.size}",
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -238,7 +334,7 @@ fun RoadMonitoringScreen(
                     }
                 }
 
-                // Map View
+                // Map View - FIXED: Better handling of null location
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -246,10 +342,29 @@ fun RoadMonitoringScreen(
                         .padding(8.dp),
                     elevation = CardDefaults.cardElevation(4.dp)
                 ) {
-                    MapView(
-                        currentLocation = currentLocation,
-                        detectedEvents = detectedEvents
-                    )
+                    if (currentLocation != null) {
+                        MapView(
+                            currentLocation = currentLocation!!,
+                            detectedEvents = detectedEvents
+                        )
+                    } else {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                "🗺️ Waiting for GPS location...",
+                                fontSize = 16.sp,
+                                color = Color.Gray
+                            )
+                            Text(
+                                "Make sure you're outside with clear sky view",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -276,7 +391,7 @@ fun AccelerometerGraph(
 
         val width = size.width
         val height = size.height
-        val maxPoints = 300 // Show last 2 seconds at 150Hz
+        val maxPoints = 300
         val displayData = data.takeLast(maxPoints)
 
         if (displayData.isEmpty()) return@Canvas
@@ -368,10 +483,8 @@ fun EventCard(event: RoadEvent) {
                     fontSize = 14.sp
                 )
                 Text(
-                    text = "Conf: ${(event.confidence * 100).toInt()}% --- Speed: ${
-                        "%.1f".format(
-                            event.speed
-                        )
+                    text = "Conf: ${(event.confidence * 100).toInt()}% • Speed: ${
+                        "%.1f".format(event.speed)
                     } km/h",
                     fontSize = 12.sp,
                     color = Color.Gray
@@ -379,7 +492,7 @@ fun EventCard(event: RoadEvent) {
             }
 
             Text(
-                text = "%.4f, %.4f".format(event.latitude, event.longitude),
+                text = "%.6f, %.6f".format(event.latitude, event.longitude),
                 fontSize = 10.sp,
                 color = Color.Gray
             )
@@ -460,7 +573,7 @@ fun EventConfirmationDialog(
 
 @Composable
 fun MapView(
-    currentLocation: Location?,
+    currentLocation: Location,
     detectedEvents: List<RoadEvent>
 ) {
     val context = LocalContext.current
@@ -473,42 +586,53 @@ fun MapView(
             MapView(ctx).apply {
                 setTileSource(TileSourceFactory.MAPNIK)
                 setMultiTouchControls(true)
-                controller.setZoom(16.0)
+                controller.setZoom(18.0) // Higher zoom for better detail
+                setUseDataConnection(true)
             }
         },
         update = { map ->
             map.overlays.clear()
 
             // Add current location marker
-            currentLocation?.let { location ->
-                val geoPoint = GeoPoint(location.latitude, location.longitude)
-                val marker = Marker(map).apply {
-                    position = geoPoint
-                    title = "Current Location"
-                    icon = ContextCompat.getDrawable(context, R.drawable.location)
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                }
-                map.overlays.add(marker)
-                map.controller.animateTo(geoPoint)
+            val geoPoint = GeoPoint(currentLocation.latitude, currentLocation.longitude)
+            val currentMarker = Marker(map).apply {
+                position = geoPoint
+                title = "Current Location"
+                snippet = "Speed: %.1f km/h\nAccuracy: %.1fm".format(
+                    currentLocation.speed * 3.6f,
+                    currentLocation.accuracy
+                )
+                icon = ContextCompat.getDrawable(context, R.drawable.location)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             }
+            map.overlays.add(currentMarker)
 
             // Add event markers
             detectedEvents.forEach { event ->
-                val geoPoint = GeoPoint(event.latitude, event.longitude)
-                val marker = Marker(map).apply {
-                    position = geoPoint
+                val eventGeoPoint = GeoPoint(event.latitude, event.longitude)
+                val eventMarker = Marker(map).apply {
+                    position = eventGeoPoint
                     title = when (event.type) {
-                        EventType.SPEED_BREAKER -> "Speed Breaker"
-                        EventType.POTHOLE -> "Pothole"
-                        EventType.BROKEN_PATCH -> "Broken Patch"
-                        else -> "Event"
+                        EventType.SPEED_BREAKER -> "🚧 Speed Breaker"
+                        EventType.POTHOLE -> "🕳️ Pothole"
+                        EventType.BROKEN_PATCH -> "⚠️ Broken Patch"
+                        else -> "Road Event"
                     }
+                    snippet = "Confidence: ${(event.confidence * 100).toInt()}%\nSpeed: %.1f km/h".format(event.speed)
                     icon = ContextCompat.getDrawable(context, R.drawable.target)
                     setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+
+                    // Show info window on click
+                    setOnMarkerClickListener { marker, mapView ->
+                        marker.showInfoWindow()
+                        true
+                    }
                 }
-                map.overlays.add(marker)
+                map.overlays.add(eventMarker)
             }
 
+            // Center map on current location
+            map.controller.animateTo(geoPoint)
             map.invalidate()
         },
         modifier = Modifier.fillMaxSize()

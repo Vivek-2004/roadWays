@@ -28,6 +28,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RoadMonitoringApp() {
     var isConfigured by remember { mutableStateOf(false) }
+
+    // FIXED: Use single ViewModel instance throughout the app
     val viewModel: RoadMonitoringViewModel = viewModel()
 
     if (!isConfigured) {
@@ -41,6 +43,7 @@ fun RoadMonitoringApp() {
             }
         )
     } else {
+        // FIXED: Pass the same ViewModel instance
         RoadMonitoringScreen(viewModel = viewModel)
     }
 }
