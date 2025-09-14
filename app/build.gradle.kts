@@ -55,6 +55,8 @@ dependencies {
     implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation("androidx.compose.ui:ui-viewbinding:1.9.0")
 
+    implementation("com.google.accompanist:accompanist-systemuicontroller:0.36.0")
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
